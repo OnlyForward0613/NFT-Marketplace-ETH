@@ -97,6 +97,53 @@ contract Marketplace is IMarketplace {
         }
     }
 
+    /// @notice Creates a bid on (`nft`, `tokenID`) tuple for `price`.
+    /// @param nft     An array of ERC-721 and / or ERC-1155 addresses.
+    /// @param tokenID Token Ids of the NFTs msg.sender wishes to buy.
+    /// @param price   Prices at which the buyer is willing to buy the NFTs.
+    function createBid(
+        INFTContract[] calldata nft,
+        uint256[] calldata tokenID,
+        uint256[] calldata price
+    ) external payable override {
+        uint256 totalPrice = 0;
+
+        for (uint256 i = 0; i < nft.length; i++) {
+            address nftAddress = address(nft[i]);
+            // bidding on own NFTs is possible. But then again, even if we wanted to disallow it,
+            // it would not be an effective mechanism, since the agent can bid from his other
+            // wallets
+            require(
+                msg.value > bids[nftAddress][tokenID[i]].price,
+                REVERT_BID_TOO_LOW
+            );
+
+            // if bid existed, let the prev. creator withdraw their bid. new overwrites
+            if (bids[nftAddress][tokenID[i]].exists) {
+                escrow[bids[nftAddress][tokenID[i]].buyer] += bids[nftAddress][
+                    tokenID[i]
+                ].price;
+            }
+
+            // overwrites or creates a new one
+            bids[nftAddress][tokenID[i]] = Bid({
+                exists: true,
+                buyer: msg.sender,
+                price: price[i]
+            });
+
+            emit CreateBid({
+                nft: nftAddress,
+                tokenID: tokenID[i],
+                price: price[i]
+            });
+
+            totalPrice += price[i];
+        }
+
+        require(totalPrice == msg.value, REVERT_INSUFFICIENT_ETHER);
+    }
+
     // ======= CANCEL ASK / BID ============================================
 
     /// @notice Cancels ask(s) that the seller previously created.
@@ -117,6 +164,29 @@ contract Marketplace is IMarketplace {
             delete asks[nftAddress][tokenID[i]];
 
             emit CancelAsk({nft: nftAddress, tokenID: tokenID[i]});
+        }
+    }
+    
+    /// @notice Cancels bid(s) that the msg.sender previously created.
+    /// @param nft     An array of ERC-721 and / or ERC-1155 addresses.
+    /// @param tokenID Token Ids of the NFTs msg.sender wishes to cancel the
+    /// bids on.
+    function cancelBid(INFTContract[] calldata nft, uint256[] calldata tokenID)
+        external
+        override
+    {
+        for (uint256 i = 0; i < nft.length; i++) {
+            address nftAddress = address(nft[i]);
+            require(
+                bids[nftAddress][tokenID[i]].buyer == msg.sender,
+                REVERT_NOT_A_CREATOR_OF_BID
+            );
+
+            escrow[msg.sender] += bids[nftAddress][tokenID[i]].price;
+
+            delete bids[nftAddress][tokenID[i]];
+
+            emit CancelBid({nft: nftAddress, tokenID: tokenID[i]});
         }
     }
 
@@ -192,6 +262,72 @@ contract Marketplace is IMarketplace {
         }
 
         require(totalPrice == msg.value, REVERT_ASK_INSUFFICIENT_VALUE);
+    }
+
+    /// @notice You are the owner of the NFTs, someone submitted the bids on them.
+    /// You accept one or more of these bids.
+    /// @param nft     An array of ERC-721 and / or ERC-1155 addresses.
+    /// @param tokenID Token Ids of the NFTs msg.sender wishes to accept the
+    /// bids on.
+    function acceptBid(INFTContract[] calldata nft, uint256[] calldata tokenID)
+        external
+        override
+    {
+        uint256 escrowDelta = 0;
+        for (uint256 i = 0; i < nft.length; i++) {
+            require(
+                nft[i].quantityOf(msg.sender, tokenID[i]) > 0,
+                REVERT_NOT_OWNER_OF_TOKEN_ID
+            );
+
+            address nftAddress = address(nft[i]);
+
+            escrowDelta += bids[nftAddress][tokenID[i]].price;
+            // escrow[msg.sender] += bids[nftAddress][tokenID[i]].price;
+
+            emit AcceptBid({
+                nft: nftAddress,
+                tokenID: tokenID[i],
+                price: bids[nftAddress][tokenID[i]].price
+            });
+
+            bool success = nft[i].safeTransferFrom_(
+                msg.sender,
+                bids[nftAddress][tokenID[i]].buyer,
+                tokenID[i],
+                new bytes(0)
+            );
+            require(success, REVERT_NFT_NOT_SENT);
+
+            delete asks[nftAddress][tokenID[i]];
+            delete bids[nftAddress][tokenID[i]];
+        }
+
+        uint256 remaining = _takeFee(escrowDelta);
+        escrow[msg.sender] = remaining;
+    }
+
+    /// @notice Sellers can receive their payment by calling this function.
+    function withdraw() external override {
+        uint256 amount = escrow[msg.sender];
+        escrow[msg.sender] = 0;
+        payable(address(msg.sender)).sendValue(amount);
+    }
+
+    // ============ ADMIN ==================================================
+
+    /// @dev Used to change the address of the trade fee receiver.
+    function changeBeneficiary(address payable newBeneficiary) external {
+        require(msg.sender == admin, "");
+        require(newBeneficiary != payable(address(0)), "");
+        beneficiary = newBeneficiary;
+    }
+
+    /// @dev sets the admin to the zero address. This implies that beneficiary
+    /// address and other admin only functions are disabled.
+    function revokeAdmin() external {
+        require(msg.sender == admin, "");
+        admin = address(0);
     }
 
     // ============ EXTENSIONS =============================================
