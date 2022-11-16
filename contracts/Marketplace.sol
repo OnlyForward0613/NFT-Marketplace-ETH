@@ -77,6 +77,7 @@ contract Marketplace is IMarketplace {
                 nft[i].quantityOf(msg.sender, tokenID[i]) > 0,
                 REVERT_NOT_OWNER_OF_TOKEN_ID
             );
+            
             // if feecollector extension applied, this ensures math is correct
             require(price[i] > 10_000, "price too low");
 
